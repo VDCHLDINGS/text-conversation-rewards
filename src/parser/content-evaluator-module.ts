@@ -75,11 +75,44 @@ export class ContentEvaluatorModule extends BaseModule {
     return true;
   }
 
+  private async _fetchOpenRouterTokenLimit(): Promise<number> {
+    const fallbackLimit = this._configuration?.openAi.tokenCountLimit ?? 124000;
+    const configuredModel = (this._configuration?.openAi as { model?: string } | undefined)?.model;
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/models");
+      if (!response.ok) {
+        return fallbackLimit;
+      }
+      const payload = (await response.json()) as {
+        data?: Array<{
+          id: string;
+          context_length?: number;
+          top_provider?: { context_length?: number; max_completion_tokens?: number };
+        }>;
+      };
+      if (!Array.isArray(payload?.data) || !payload.data.length) {
+        return fallbackLimit;
+      }
+      const matched = configuredModel
+        ? payload.data.find((m) => m.id === configuredModel || m.id.endsWith(`/${configuredModel}`))
+        : payload.data[0];
+      const modelLimit = matched?.top_provider?.context_length ?? matched?.context_length;
+      if (typeof modelLimit === "number" && modelLimit > 0) {
+        return Math.min(modelLimit, fallbackLimit);
+      }
+    } catch (err) {
+      this.context.logger.debug("Falling back to configured tokenCountLimit after OpenRouter models lookup error", {
+        err,
+      });
+    }
+    return fallbackLimit;
+  }
+
   async transform(data: Readonly<IssueActivity>, result: Result) {
     if (!this._configuration?.openAi.tokenCountLimit) {
       throw this.context.logger.fatal("Token count limit is missing, comments cannot be evaluated.");
     }
-    this._tokenLimit = this._configuration.openAi.tokenCountLimit;
+    this._tokenLimit = await this._fetchOpenRouterTokenLimit();
     this.context.logger.info(`Using token limit: ${this._tokenLimit}`);
 
     const promises: Promise<GithubCommentScore[]>[] = [];
